@@ -1,179 +1,179 @@
 name: publish
 
+# This workflow publishes pre-built images from ci-docker.yml
+# Downloads digest artifacts from ci-docker.yml (images already in GHCR)
+# Creates multi-arch manifests and copies/retags to Docker Hub + GHCR with proper tags
+
+################################################################################
+# CONFIGURATION FOR FORKS
+################################################################################
+#
+# This workflow is designed to be fork-friendly. Follow these steps to configure
+# your forked repository:
+#
+# 1. REQUIRED: Set up Docker Hub credentials
+#    Go to: Settings > Secrets and variables > Actions > Secrets
+#    Add the following Repository Secrets:
+#    
+#    DOCKER_PASSWORD (REQUIRED)
+#      - Your Docker Hub personal access token
+#      - Create at: https://hub.docker.com/settings/security
+#      - Permissions: Read & Write
+#    
+#    DOCKER_USERNAME (OPTIONAL)
+#      - Your Docker Hub username
+#      - If not set, defaults to 'blinklabs'
+#      - Only set this if publishing to your own Docker Hub account
+#
+# 2. OPTIONAL: Customize image names
+#    Go to: Settings > Secrets and variables > Actions > Variables
+#    Add the following Repository Variables (only if needed):
+#    
+#    DOCKER_IMAGE_NAME (OPTIONAL)
+#      - Docker Hub image name (e.g., yourname/cardano-node)
+#      - If not set, defaults to: blinklabs/cardano-node
+#    
+#    GHCR_IMAGE_NAME (OPTIONAL)
+#      - GitHub Container Registry image name
+#      - If not set, defaults to: ghcr.io/YOUR_USERNAME/cardano-node
+#      - Example: ghcr.io/myorg/cardano-node
+#
+# 3. OPTIONAL: Disable main branch publishing (conserve resources)
+#    Go to: Settings > Secrets and variables > Actions > Variables
+#    Add the following Repository Variable:
+#    
+#    ENABLE_UPSTREAM_MAIN_PUBLISH
+#      - Set to: false
+#      - Effect: Skips publishing on main branch pushes
+#      - Note: Tags will STILL be published (conserves resources for forks)
+#      - Leave unset or set to 'true' to publish on all events
+#
+# 4. AUTOMATIC: GitHub Container Registry (GHCR)
+#    - GITHUB_TOKEN is automatically provided by GitHub Actions
+#    - No additional configuration needed
+#    - Images will be published to: ghcr.io/YOUR_USERNAME/cardano-node
+#
+# 5. Repository Permissions
+#    Go to: Settings > Actions > General > Workflow permissions
+#    Ensure: "Read and write permissions" is selected
+#    This allows the workflow to push to GHCR
+#
+################################################################################
+# SUMMARY OF GITHUB SETTINGS NEEDED:
+################################################################################
+#
+# Repository Secrets (Settings > Secrets and variables > Actions > Secrets):
+#   ✓ DOCKER_PASSWORD        (REQUIRED - Docker Hub token)
+#   ○ DOCKER_USERNAME        (OPTIONAL - defaults to 'blinklabs')
+#
+# Repository Variables (Settings > Secrets and variables > Actions > Variables):
+#   ○ DOCKER_IMAGE_NAME              (OPTIONAL - defaults to blinklabs/cardano-node)
+#   ○ GHCR_IMAGE_NAME                (OPTIONAL - defaults to ghcr.io/{owner}/cardano-node)
+#   ○ ENABLE_UPSTREAM_MAIN_PUBLISH   (OPTIONAL - set to 'false' to skip main branch)
+#
+# Workflow Permissions (Settings > Actions > General):
+#   ✓ Read and write permissions (for GHCR push)
+#
+################################################################################
+
 on:
-  push:
-    branches: ["main"]
-    tags: ["v*.*.*"]
+  workflow_run:
+    workflows: ["Docker CI"]
+    types:
+      - completed
+    # No branches filter - triggers for both main and tags
 
 concurrency: ${{ github.ref }}
 
 env:
-  DOCKER_IMAGE_NAME: blinklabs/cardano-node
-  GHCR_IMAGE_NAME: ghcr.io/blinklabs-io/cardano-node
+  # Image names - these can be customized via Repository Variables
+  # To customize: Settings > Secrets and variables > Actions > Variables
+  DOCKER_IMAGE_NAME: ${{ vars.DOCKER_IMAGE_NAME || 'blinklabs/cardano-node' }}
+  GHCR_IMAGE_NAME: ${{ vars.GHCR_IMAGE_NAME || format('ghcr.io/{0}/cardano-node', github.repository_owner) }}
+  
+  # Docker Hub username - configured via Repository Secrets
+  # To customize: Settings > Secrets and variables > Actions > Secrets > DOCKER_USERNAME
+  DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME || 'blinklabs' }}
+  
+  # Fork control - set via Repository Variables to skip main branch publishes
+  # To enable: Settings > Secrets and variables > Actions > Variables > ENABLE_UPSTREAM_MAIN_PUBLISH = false
+  ENABLE_UPSTREAM_MAIN_PUBLISH: ${{ vars.ENABLE_UPSTREAM_MAIN_PUBLISH != 'false' }}
 
 jobs:
-  build-amd64:
-    # runs-on: ubuntu-latest
-    runs-on: [self-hosted, Linux, X64, ansible]
-    permissions:
-      contents: read
-      packages: write
+  # Only run publish if CI workflow succeeded
+  check-ci-success:
+    if: |
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
     steps:
-      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 https://github.com/actions/checkout/releases/tag/v6.0.0
-      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1 https://github.com/docker/setup-buildx-action/releases/tag/v3.11.1
-      - name: Login to Docker Hub
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0 https://github.com/docker/login-action/releases/tag/v3.6.0
-        with:
-          username: blinklabs
-          password: ${{ secrets.DOCKER_PASSWORD }} # uses token
-      - name: Login to GHCR
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0 https://github.com/docker/login-action/releases/tag/v3.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 https://github.com/actions/cache/releases/tag/v4.3.0
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-${{ runner.arch }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-buildx-
-      - id: meta
-        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0 https://github.com/docker/metadata-action/releases/tag/v5.9.0
-        with:
-          images: |
-            ${{ env.DOCKER_IMAGE_NAME }}
-            ${{ env.GHCR_IMAGE_NAME }}
-          flavor: |
-            latest=false
-            suffix=-amd64
-          tags: |
-            # Only version, no revision
-            type=match,pattern=v(.*)-(.*),group=1
-            # branch
-            type=ref,event=branch
-            # semver
-            type=semver,pattern={{version}}
-      - name: push
-        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0 https://github.com/docker/build-push-action/releases/tag/v6.18.0
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
-      # TEMP fix
-      # https://github.com/docker/build-push-action/issues/252
-      # https://github.com/moby/buildkit/issues/1896
-      - name: cache
+      - name: Check if should publish
+        id: check
         run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-      # TEMP fix
-      # Something strange is happening with the manifests when we push which
-      # breaks the downstream multi-arch-manifest, so pull and push to work
-      # around this by resubmitting manifests
-      - name: pull-and-push
-        run: |
-          for t in `echo '${{ steps.meta.outputs.tags }}'`; do
-            docker pull $t && docker push $t
-          done
+          # Check if this is a fork and if we should skip upstream main publishes
+          IS_FORK="${{ github.repository != github.event.workflow_run.repository.full_name }}"
+          IS_MAIN_BRANCH="${{ github.event.workflow_run.head_branch == 'main' }}"
+          IS_TAG="${{ startsWith(github.event.workflow_run.head_branch, 'refs/tags/') || github.event.workflow_run.ref_type == 'tag' }}"
+          ENABLE_MAIN_PUBLISH="${{ env.ENABLE_UPSTREAM_MAIN_PUBLISH }}"
+          
+          SHOULD_PUBLISH="true"
+          
+          # If this is a fork and main branch publish is disabled, skip main branch (but allow tags)
+          if [[ "$IS_FORK" == "true" ]] && [[ "$IS_MAIN_BRANCH" == "true" ]] && [[ "$IS_TAG" == "false" ]] && [[ "$ENABLE_MAIN_PUBLISH" == "false" ]]; then
+            echo "Fork detected with main branch publish disabled - skipping"
+            SHOULD_PUBLISH="false"
+          fi
+          
+          echo "should_publish=$SHOULD_PUBLISH" >> $GITHUB_OUTPUT
+          echo "CI passed, should_publish=$SHOULD_PUBLISH"
 
-  build-arm64:
-    runs-on: ubuntu-24.04-arm
+  merge:
+    runs-on: ubuntu-latest
+    needs: [check-ci-success]
+    if: needs.check-ci-success.outputs.should_publish == 'true'
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 https://github.com/actions/checkout/releases/tag/v6.0.0
-      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1 https://github.com/docker/setup-buildx-action/releases/tag/v3.11.1
-      - name: Login to Docker Hub
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0 https://github.com/docker/login-action/releases/tag/v3.6.0
-        with:
-          username: blinklabs
-          password: ${{ secrets.DOCKER_PASSWORD }} # uses token
-      - name: Login to GHCR
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0 https://github.com/docker/login-action/releases/tag/v3.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 https://github.com/actions/cache/releases/tag/v4.3.0
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-${{ runner.arch }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-buildx-
-      - id: meta
-        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0 https://github.com/docker/metadata-action/releases/tag/v5.9.0
-        with:
-          images: |
-            ${{ env.DOCKER_IMAGE_NAME }}
-            ${{ env.GHCR_IMAGE_NAME }}
-          flavor: |
-            latest=false
-            suffix=-arm64v8
-          tags: |
-            # Only version, no revision
-            type=match,pattern=v(.*)-(.*),group=1
-            # branch
-            type=ref,event=branch
-            # semver
-            type=semver,pattern={{version}}
-      - name: push
-        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0 https://github.com/docker/build-push-action/releases/tag/v6.18.0
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
-      # TEMP fix
-      # https://github.com/docker/build-push-action/issues/252
-      # https://github.com/moby/buildkit/issues/1896
-      - name: cache
-        run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-      # TEMP fix
-      # Something strange is happening with the manifests when we push which
-      # breaks the downstream multi-arch-manifest, so pull and push to work
-      # around this by resubmitting manifests
-      - name: pull-and-push
-        run: |
-          for t in `echo '${{ steps.meta.outputs.tags }}'`; do
-            docker pull $t && docker push $t
-          done
 
-  multi-arch-manifest:
-    runs-on: [self-hosted, Linux, X64, ansible]
-    needs: [build-amd64, build-arm64]
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 https://github.com/actions/checkout/releases/tag/v6.0.0
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1 https://github.com/docker/setup-buildx-action/releases/tag/v3.11.1
+
+      # Download digest artifacts created by ci-docker.yml
+      # These reference images already pushed to GHCR by digest
+      - name: Download digests
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+          run-id: ${{ github.event.workflow_run.id }}  # Download from triggering CI workflow
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Login to Docker Hub
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0 https://github.com/docker/login-action/releases/tag/v3.6.0
         with:
-          username: blinklabs
-          password: ${{ secrets.DOCKER_PASSWORD }} # uses token
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}  # Set in: Settings > Secrets > DOCKER_PASSWORD
+
       - name: Login to GHCR
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0 https://github.com/docker/login-action/releases/tag/v3.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}  # Automatically provided by GitHub
+
       - id: meta-dockerhub
         name: Metadata - Docker Hub
         uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0 https://github.com/docker/metadata-action/releases/tag/v5.9.0
         with:
           images: ${{ env.DOCKER_IMAGE_NAME }}
           flavor: |
-            latest=false
+            latest=auto
+            prefix=
+            suffix=
           tags: |
             # Only version, no revision
             type=match,pattern=v(.*)-(.*),group=1
@@ -181,24 +181,16 @@ jobs:
             type=ref,event=branch
             # semver
             type=semver,pattern={{version}}
-      - id: meta-dockerhub-tag
-        name: Metadata - Docker Hub (Tags)
-        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0 https://github.com/docker/metadata-action/releases/tag/v5.9.0
-        with:
-          images: |
-            ${{ env.DOCKER_IMAGE_NAME }}
-          flavor: |
-            latest=false
-          tags: |
-            # Only version, no revision
-            type=match,pattern=v(.*)-(.*),group=1
+
       - id: meta-ghcr
         name: Metadata - GHCR
         uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0 https://github.com/docker/metadata-action/releases/tag/v5.9.0
         with:
           images: ${{ env.GHCR_IMAGE_NAME }}
           flavor: |
-            latest=false
+            latest=auto
+            prefix=
+            suffix=
           tags: |
             # Only version, no revision
             type=match,pattern=v(.*)-(.*),group=1
@@ -206,91 +198,65 @@ jobs:
             type=ref,event=branch
             # semver
             type=semver,pattern={{version}}
-      - id: meta-ghcr-tag
-        name: Metadata - GHCR (Tags)
-        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0 https://github.com/docker/metadata-action/releases/tag/v5.9.0
-        with:
-          images: |
-            ${{ env.GHCR_IMAGE_NAME }}
-          flavor: |
-            latest=false
-          tags: |
-            # Only version, no revision
-            type=match,pattern=v(.*)-(.*),group=1
 
-      # First, create manifests and push to GHCR
+      # Create multi-arch manifest for GHCR
+      # This copies the existing digest-based images from GHCR and creates a manifest with proper tags
+      # Images were already pushed to GHCR by ci-docker.yml - we're just retagging them here
+      - name: Create manifest list and push to GHCR
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.GHCR_IMAGE_NAME }}@sha256:%s ' *)
+        env:
+          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta-ghcr.outputs.json }}
 
-      # Manifest for either branch or semver
-      - name: manifest-ghcr
+      # Create multi-arch manifest for Docker Hub
+      # This copies/mirrors images from GHCR to Docker Hub
+      # The source digests are in GHCR, but the -t tags specify Docker Hub destination
+      # imagetools automatically handles cross-registry copying
+      - name: Create manifest list and push to Docker Hub
+        working-directory: ${{ runner.temp }}/digests
         run: |
-          for t in `echo '${{ steps.meta-ghcr.outputs.tags }}'`; do
-            docker manifest create ${t} --amend ${t}-amd64 --amend ${t}-arm64v8
-          done
-      # Optional manifest for tag versions (includes revisions)
-      - name: manifest-ghcr-tags
-        run: |
-          for t in `echo '${{ steps.meta-ghcr-tag.outputs.tags }}'`; do
-            docker manifest create ${t} --amend ${t}-amd64 --amend ${t}-arm64v8
-            docker manifest create ${{ env.GHCR_IMAGE_NAME }}:latest --amend ${t}-amd64 --amend ${t}-arm64v8
-          done
-        if: startsWith(github.ref, 'refs/tags/') && ! contains(github.ref, '-pre-')
-      # Push various manifests
-      - name: push-ghcr
-        run: |
-          for t in `echo '${{ steps.meta-ghcr.outputs.tags }}'`; do
-            docker manifest push ${t}
-          done
-      - name: push-ghcr-tags
-        run: |
-          docker manifest push ${{ env.GHCR_IMAGE_NAME }}:latest
-          for t in `echo '${{ steps.meta-ghcr-tag.outputs.tags }}'`; do
-            docker manifest push ${t}
-          done
-        if: startsWith(github.ref, 'refs/tags/') && ! contains(github.ref, '-pre-')
+          # Build tags list from Docker Hub metadata
+          TAGS=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          
+          # Build source digests list (from GHCR)
+          DIGESTS=$(printf '${{ env.GHCR_IMAGE_NAME }}@sha256:%s ' *)
+          
+          echo "Creating Docker Hub manifest with tags: $TAGS"
+          echo "Source digests from GHCR: $DIGESTS"
+          
+          # imagetools create copies from GHCR digests to Docker Hub with specified tags
+          docker buildx imagetools create $TAGS $DIGESTS
+        env:
+          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta-dockerhub.outputs.json }}
 
-      # Now, create manifests for Docker Hub
+      - name: Inspect GHCR image
+        run: |
+          docker buildx imagetools inspect ${{ env.GHCR_IMAGE_NAME }}:${{ steps.meta-ghcr.outputs.version }}
 
-      - name: manifest-dockerhub
+      - name: Inspect Docker Hub image
         run: |
-          for t in `echo '${{ steps.meta-dockerhub.outputs.tags }}'`; do
-            docker manifest create ${t} --amend ${t}-amd64 --amend ${t}-arm64v8
-          done
-      - name: manifest-dockerhub-tags
-        run: |
-          for t in `echo '${{ steps.meta-dockerhub-tag.outputs.tags }}'`; do
-            docker manifest create ${t} --amend ${t}-amd64 --amend ${t}-arm64v8
-            docker manifest create ${{ env.DOCKER_IMAGE_NAME }}:latest --amend ${t}-amd64 --amend ${t}-arm64v8
-          done
-        if: startsWith(github.ref, 'refs/tags/') && ! contains(github.ref, '-pre-')
-      - name: push-dockerhub
-        run: |
-          for t in `echo '${{ steps.meta-dockerhub.outputs.tags }}'`; do
-            docker manifest push ${t}
-          done
-      - name: push-dockerhub-tags
-        run: |
-          docker manifest push ${{ env.DOCKER_IMAGE_NAME }}:latest
-          for t in `echo '${{ steps.meta-dockerhub-tag.outputs.tags }}'`; do
-            docker manifest push ${t}
-          done
-        if: startsWith(github.ref, 'refs/tags/') && ! contains(github.ref, '-pre-')
+          docker buildx imagetools inspect ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.meta-dockerhub.outputs.version }}
 
       # Update Docker Hub from README
 
+      # Updates Docker Hub repository description from README.md
+      # Requires DOCKER_PASSWORD secret with read/write permissions
       - name: Docker Hub Description
         uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0 https://github.com/peter-evans/dockerhub-description/releases/tag/v5.0.0
         with:
-          username: blinklabs
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}  # Set in: Settings > Secrets > DOCKER_PASSWORD
           repository: ${{ env.DOCKER_IMAGE_NAME }}
           readme-filepath: ./README.md
           short-description: "Cardano Node built from source on Debian"
 
   github-release:
-    runs-on: [self-hosted, Linux, X64, ansible]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
-    needs: [multi-arch-manifest]
+    needs: [merge]
     steps:
       - run: 'echo "RELEASE_TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV'
       - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0 https://github.com/actions/github-script/releases/tag/v8.0.0
