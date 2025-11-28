@@ -81,9 +81,15 @@ on:
     workflows: ["Docker CI"]
     types:
       - completed
-    # No branches filter - triggers for both main and tags
+    # IMPORTANT: workflow_run requires specifying branches OR no filter at all
+    # Without branches, it triggers for ALL branch/tag refs where the workflow runs
+    # We filter specific events in check-ci-success job instead
 
-concurrency: ${{ github.ref }}
+# Use workflow_run's github.event.workflow_run.id for concurrency
+# This ensures we don't have concurrent publishes for the same CI run
+concurrency:
+  group: publish-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
 
 env:
   # Image names - these can be customized via Repository Variables
@@ -100,11 +106,8 @@ env:
   ENABLE_UPSTREAM_MAIN_PUBLISH: ${{ vars.ENABLE_UPSTREAM_MAIN_PUBLISH != 'false' }}
 
 jobs:
-  # Only run publish if CI workflow succeeded
+  # Always runs when triggered, checks CI success and publish criteria
   check-ci-success:
-    if: |
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
     outputs:
       should_publish: ${{ steps.check.outputs.should_publish }}
@@ -112,10 +115,32 @@ jobs:
       - name: Check if should publish
         id: check
         run: |
+          echo "=== Workflow Run Information ==="
+          echo "Conclusion: ${{ github.event.workflow_run.conclusion }}"
+          echo "Event: ${{ github.event.workflow_run.event }}"
+          echo "Head branch: ${{ github.event.workflow_run.head_branch }}"
+          echo "Head SHA: ${{ github.event.workflow_run.head_sha }}"
+          echo "Repository: ${{ github.event.workflow_run.repository.full_name }}"
+          echo "==============================="
+          
+          # Check if CI workflow succeeded
+          if [[ "${{ github.event.workflow_run.conclusion }}" != "success" ]]; then
+            echo "CI workflow did not succeed (conclusion: ${{ github.event.workflow_run.conclusion }})"
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Check if this was a push event (not PR)
+          if [[ "${{ github.event.workflow_run.event }}" != "push" ]]; then
+            echo "CI workflow was not triggered by push event (event: ${{ github.event.workflow_run.event }})"
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
           # Check if this is a fork and if we should skip upstream main publishes
           IS_FORK="${{ github.repository != github.event.workflow_run.repository.full_name }}"
           IS_MAIN_BRANCH="${{ github.event.workflow_run.head_branch == 'main' }}"
-          IS_TAG="${{ startsWith(github.event.workflow_run.head_branch, 'refs/tags/') || github.event.workflow_run.ref_type == 'tag' }}"
+          IS_TAG="${{ startsWith(github.event.workflow_run.head_branch, 'refs/tags/') }}"
           ENABLE_MAIN_PUBLISH="${{ env.ENABLE_UPSTREAM_MAIN_PUBLISH }}"
           
           SHOULD_PUBLISH="true"
@@ -127,7 +152,7 @@ jobs:
           fi
           
           echo "should_publish=$SHOULD_PUBLISH" >> $GITHUB_OUTPUT
-          echo "CI passed, should_publish=$SHOULD_PUBLISH"
+          echo "Final decision: should_publish=$SHOULD_PUBLISH"
 
   merge:
     runs-on: ubuntu-latest
