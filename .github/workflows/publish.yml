@@ -177,6 +177,16 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}  # Download from triggering CI workflow
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Download ref info artifact from ci-docker.yml
+      # Contains github.ref, github.ref_name, github.ref_type from original trigger
+      - name: Download ref info
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: ref-info
+          path: ${{ runner.temp }}/ref-info
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Login to Docker Hub
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0 https://github.com/docker/login-action/releases/tag/v3.6.0
         with:
@@ -190,37 +200,40 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}  # Automatically provided by GitHub
 
-      # Override GitHub context for metadata-action in workflow_run context
-      # 
-      # PROBLEM: workflow_run trigger causes github.ref to point to publish.yml's
-      # location (refs/heads/main), not the original trigger ref (tag or branch).
-      # The metadata-action reads github.ref to extract version/tag information.
-      #
-      # SOLUTION: Set GITHUB_REF* environment variables from workflow_run.head_branch
-      # before metadata-action runs. These env vars override the context values.
-      #
-      # REFERENCES:
-      # - metadata-action uses github.ref: https://github.com/docker/metadata-action
-      # - workflow_run context: https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#workflow_run
-      # - Setting env vars to override context: https://docs.github.com/en/actions/learn-github-actions/variables#default-environment-variables
-      - name: Set ref context from workflow_run
+      # Parse ref info from ci-docker.yml artifact
+      # workflow_run context doesn't preserve github.ref correctly
+      # We receive the correct ref values via artifact and parse them for type=raw tags
+      - name: Parse ref info
+        id: ref
         run: |
-          HEAD_BRANCH="${{ github.event.workflow_run.head_branch }}"
-          echo "Original trigger: $HEAD_BRANCH"
+          REF=$(cat ${{ runner.temp }}/ref-info/ref.txt)
+          REF_NAME=$(cat ${{ runner.temp }}/ref-info/ref_name.txt)
+          REF_TYPE=$(cat ${{ runner.temp }}/ref-info/ref_type.txt)
           
-          if [[ "$HEAD_BRANCH" == refs/tags/* ]]; then
-            # Tag push: refs/tags/v10.5.3-testci
-            TAG_NAME="${HEAD_BRANCH#refs/tags/}"
-            echo "Detected tag: $TAG_NAME"
-            echo "GITHUB_REF=$HEAD_BRANCH" >> $GITHUB_ENV
-            echo "GITHUB_REF_NAME=$TAG_NAME" >> $GITHUB_ENV
-            echo "GITHUB_REF_TYPE=tag" >> $GITHUB_ENV
-          else
-            # Branch push: main
-            echo "Detected branch: $HEAD_BRANCH"
-            echo "GITHUB_REF=refs/heads/$HEAD_BRANCH" >> $GITHUB_ENV
-            echo "GITHUB_REF_NAME=$HEAD_BRANCH" >> $GITHUB_ENV
-            echo "GITHUB_REF_TYPE=branch" >> $GITHUB_ENV
+          echo "Ref info from ci-docker.yml:"
+          echo "  ref: $REF"
+          echo "  ref_name: $REF_NAME"
+          echo "  ref_type: $REF_TYPE"
+          
+          # Set outputs for metadata-action
+          echo "ref=$REF" >> $GITHUB_OUTPUT
+          echo "ref_name=$REF_NAME" >> $GITHUB_OUTPUT
+          echo "ref_type=$REF_TYPE" >> $GITHUB_OUTPUT
+          
+          # Parse version info for tags
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            # Remove 'v' prefix: v1.2.3 -> 1.2.3
+            VERSION="${REF_NAME#v}"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            
+            # Check if prerelease
+            if [[ "$VERSION" =~ -pre-|-rc|-alpha|-beta|-testci ]]; then
+              echo "is_latest=false" >> $GITHUB_OUTPUT
+              echo "Prerelease detected, will NOT create :latest tag"
+            else
+              echo "is_latest=true" >> $GITHUB_OUTPUT
+              echo "Release tag detected, WILL create :latest tag"
+            fi
           fi
 
       - id: meta-dockerhub
@@ -229,16 +242,14 @@ jobs:
         with:
           images: ${{ env.DOCKER_IMAGE_NAME }}
           flavor: |
-            latest=auto  # Automatically adds :latest for release tags (not prereleases)
-            prefix=
-            suffix=
+            latest=false  # We manually control :latest via type=raw below
           tags: |
-            # Only version, no revision
-            type=match,pattern=v(.*)-(.*),group=1
-            # branch
-            type=ref,event=branch
-            # semver
-            type=semver,pattern={{version}}
+            # Branch name for branch pushes (e.g., main)
+            type=raw,value=${{ steps.ref.outputs.ref_name }},enable=${{ steps.ref.outputs.ref_type == 'branch' }}
+            # Version tag for tag pushes (e.g., v1.2.3 -> 1.2.3)
+            type=raw,value=${{ steps.ref.outputs.version }},enable=${{ steps.ref.outputs.ref_type == 'tag' }}
+            # :latest for non-prerelease tags only
+            type=raw,value=latest,enable=${{ steps.ref.outputs.is_latest == 'true' }}
 
       - id: meta-ghcr
         name: Metadata - GHCR
@@ -246,16 +257,14 @@ jobs:
         with:
           images: ${{ env.GHCR_IMAGE_NAME }}
           flavor: |
-            latest=auto  # Automatically adds :latest for release tags (not prereleases)
-            prefix=
-            suffix=
+            latest=false  # We manually control :latest via type=raw below
           tags: |
-            # Only version, no revision
-            type=match,pattern=v(.*)-(.*),group=1
-            # branch
-            type=ref,event=branch
-            # semver
-            type=semver,pattern={{version}}
+            # Branch name for branch pushes (e.g., main)
+            type=raw,value=${{ steps.ref.outputs.ref_name }},enable=${{ steps.ref.outputs.ref_type == 'branch' }}
+            # Version tag for tag pushes (e.g., v1.2.3 -> 1.2.3)
+            type=raw,value=${{ steps.ref.outputs.version }},enable=${{ steps.ref.outputs.ref_type == 'tag' }}
+            # :latest for non-prerelease tags only
+            type=raw,value=latest,enable=${{ steps.ref.outputs.is_latest == 'true' }}
 
       # Create multi-arch manifest for GHCR
       # This copies the existing digest-based images from GHCR and creates a manifest with proper tags

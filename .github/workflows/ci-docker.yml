@@ -100,3 +100,28 @@ jobs:
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
+
+  # Export ref information for publish.yml
+  # workflow_run context doesn't preserve github.ref correctly, so we pass it explicitly
+  ref-info:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - name: Export ref info
+        run: |
+          mkdir -p ${{ runner.temp }}/ref-info
+          echo "${{ github.ref }}" > ${{ runner.temp }}/ref-info/ref.txt
+          echo "${{ github.ref_name }}" > ${{ runner.temp }}/ref-info/ref_name.txt
+          echo "${{ github.ref_type }}" > ${{ runner.temp }}/ref-info/ref_type.txt
+          echo "Exported ref info:"
+          echo "  ref: ${{ github.ref }}"
+          echo "  ref_name: ${{ github.ref_name }}"
+          echo "  ref_type: ${{ github.ref_type }}"
+
+      - name: Upload ref info
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.5.0
+        with:
+          name: ref-info
+          path: ${{ runner.temp }}/ref-info/*
+          if-no-files-found: error
+          retention-days: 1
