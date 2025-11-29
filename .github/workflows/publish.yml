@@ -267,14 +267,22 @@ jobs:
         continue-on-error: true
         run: |
           echo "Inspecting Docker Hub manifest:"
-          docker buildx imagetools inspect docker.io/${{ env.DOCKER_IMAGE_NAME }}:${{ steps.meta-dockerhub.outputs.version }}
+          IMAGE_REF="docker.io/${{ env.DOCKER_IMAGE_NAME }}:${{ steps.meta-dockerhub.outputs.version }}"
+          echo "Image reference: $IMAGE_REF"
+          if [ -n "$IMAGE_REF" ] && [ "$IMAGE_REF" != "docker.io/:" ]; then
+            docker buildx imagetools inspect "$IMAGE_REF"
+          else
+            echo "Invalid image reference, skipping inspect"
+          fi
 
       # Update Docker Hub from README
 
       # Updates Docker Hub repository description from README.md
       # Requires DOCKER_PASSWORD secret with read/write permissions
+      # Note: Personal Access Tokens need "Read, Write, Delete" permissions
       - name: Docker Hub Description
-        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0 https://github.com/peter-evans/dockerhub-description/releases/tag/v5.0.0
+        continue-on-error: true  # Don't fail workflow if description update fails
+        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
         with:
           username: ${{ env.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}  # Set in: Settings > Secrets > DOCKER_PASSWORD
