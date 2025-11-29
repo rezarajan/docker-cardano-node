@@ -9,11 +9,11 @@ on:
   pull_request:
     branches: ["main", "release/**"]
     paths:
-      ["Dockerfile", "bin/**", "config/**", ".github/workflows/ci-docker.yml"]
+      ["Dockerfile", "bin/**", "config/**", ".github/workflows/**"]
   push:
     branches: ["main"]
     paths:
-      ["Dockerfile", "bin/**", "config/**", ".github/workflows/ci-docker.yml"]
+      ["Dockerfile", "bin/**", "config/**", ".github/workflows/**"]
     tags:
       - "v*.*.*"
 
