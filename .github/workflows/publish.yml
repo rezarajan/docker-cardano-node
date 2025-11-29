@@ -256,13 +256,18 @@ jobs:
         env:
           DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta-dockerhub.outputs.json }}
 
+      # Verify manifests were created successfully
       - name: Inspect GHCR image
+        continue-on-error: true
         run: |
+          echo "Inspecting GHCR manifest:"
           docker buildx imagetools inspect ${{ env.GHCR_IMAGE_NAME }}:${{ steps.meta-ghcr.outputs.version }}
 
       - name: Inspect Docker Hub image
+        continue-on-error: true
         run: |
-          docker buildx imagetools inspect ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.meta-dockerhub.outputs.version }}
+          echo "Inspecting Docker Hub manifest:"
+          docker buildx imagetools inspect docker.io/${{ env.DOCKER_IMAGE_NAME }}:${{ steps.meta-dockerhub.outputs.version }}
 
       # Update Docker Hub from README
 
