@@ -190,13 +190,46 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}  # Automatically provided by GitHub
 
+      # Override GitHub context for metadata-action in workflow_run context
+      # 
+      # PROBLEM: workflow_run trigger causes github.ref to point to publish.yml's
+      # location (refs/heads/main), not the original trigger ref (tag or branch).
+      # The metadata-action reads github.ref to extract version/tag information.
+      #
+      # SOLUTION: Set GITHUB_REF* environment variables from workflow_run.head_branch
+      # before metadata-action runs. These env vars override the context values.
+      #
+      # REFERENCES:
+      # - metadata-action uses github.ref: https://github.com/docker/metadata-action
+      # - workflow_run context: https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#workflow_run
+      # - Setting env vars to override context: https://docs.github.com/en/actions/learn-github-actions/variables#default-environment-variables
+      - name: Set ref context from workflow_run
+        run: |
+          HEAD_BRANCH="${{ github.event.workflow_run.head_branch }}"
+          echo "Original trigger: $HEAD_BRANCH"
+          
+          if [[ "$HEAD_BRANCH" == refs/tags/* ]]; then
+            # Tag push: refs/tags/v10.5.3-testci
+            TAG_NAME="${HEAD_BRANCH#refs/tags/}"
+            echo "Detected tag: $TAG_NAME"
+            echo "GITHUB_REF=$HEAD_BRANCH" >> $GITHUB_ENV
+            echo "GITHUB_REF_NAME=$TAG_NAME" >> $GITHUB_ENV
+            echo "GITHUB_REF_TYPE=tag" >> $GITHUB_ENV
+          else
+            # Branch push: main
+            echo "Detected branch: $HEAD_BRANCH"
+            echo "GITHUB_REF=refs/heads/$HEAD_BRANCH" >> $GITHUB_ENV
+            echo "GITHUB_REF_NAME=$HEAD_BRANCH" >> $GITHUB_ENV
+            echo "GITHUB_REF_TYPE=branch" >> $GITHUB_ENV
+          fi
+
       - id: meta-dockerhub
         name: Metadata - Docker Hub
         uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0 https://github.com/docker/metadata-action/releases/tag/v5.9.0
         with:
           images: ${{ env.DOCKER_IMAGE_NAME }}
           flavor: |
-            latest=auto
+            latest=auto  # Automatically adds :latest for release tags (not prereleases)
             prefix=
             suffix=
           tags: |
@@ -213,7 +246,7 @@ jobs:
         with:
           images: ${{ env.GHCR_IMAGE_NAME }}
           flavor: |
-            latest=auto
+            latest=auto  # Automatically adds :latest for release tags (not prereleases)
             prefix=
             suffix=
           tags: |
