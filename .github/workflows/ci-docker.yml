@@ -55,43 +55,30 @@ jobs:
           # Extract architecture from platform (linux/amd64 -> amd64)
           echo "ARCH=${platform##*/}" >> $GITHUB_ENV
 
-      # Generate metadata with proper tags for GHCR
-      # Tags follow same convention as publish.yml would generate
-      # For push events, this creates tags like: main-amd64, v1.2.3-amd64, etc.
-      # For PRs, metadata generated but not used (build to cache only)
+      # Generate metadata for labels
+      # When using push-by-digest, we don't create tagged images here
+      # Tags will be created by publish.yml manifest step
       - id: meta
         uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0
         with:
           images: ${{ env.GHCR_IMAGE_NAME }}
-          flavor: |
-            latest=false
-            suffix=-${{ env.ARCH == 'arm64' && 'arm64v8' || 'amd64' }}
-          tags: |
-            # branch name (e.g., main-amd64)
-            type=ref,event=branch
-            # semver (e.g., 10.3.1-amd64, 10.3-amd64, 10-amd64)
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            # version without revision (e.g., 10.3.1-amd64 from v10.3.1-1)
-            type=match,pattern=v(.*)-(.*),group=1
 
-      # Build and conditionally push to GHCR
+      # Build and conditionally push to GHCR by digest
       # PRs: Build to cache only (no push)
-      # Push events: Build and push to GHCR with arch-specific tags + by digest
-      - name: Build and push to GHCR
+      # Push events: Build and push by digest to GHCR (no tags yet)
+      # publish.yml will create multi-arch manifests with proper tags
+      - name: Build and push by digest
         id: build
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ env.GHCR_IMAGE_NAME }}  # Just registry/image name, not specific tags
           cache-from: type=gha,scope=buildkit-${{ env.ARCH }}
           cache-to: type=gha,mode=max,scope=buildkit-${{ env.ARCH }}
-          # PRs: cache only, Push events: push to GHCR with tags AND by digest
-          push: ${{ github.event_name == 'push' }}
-          outputs: ${{ github.event_name == 'push' && 'type=image,push-by-digest=true,name-canonical=true,push=true' || '' }}
+          # PRs: cache only, Push events: push by digest to GHCR
+          outputs: ${{ github.event_name == 'push' && 'type=image,name-canonical=true,push-by-digest=true,push=true' || 'type=cacheonly' }}
 
       # Export digest for multi-arch manifest creation in publish.yml
       # Digest identifies the exact image by content hash
